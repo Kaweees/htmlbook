@@ -18,11 +18,11 @@ def find_pyproject_toml(start_path=None):
     return find_pyproject_toml(parent_dir)
 
 
-def get_project_name():
+def get_project_name(start_path=None):
     """Extract project name from pyproject.toml file.
 
     Args:
-        pyproject_path: Path to pyproject.toml file
+        start_path: Directory to search from (default: current working directory).
 
     Returns:
         Project name as string
@@ -30,7 +30,7 @@ def get_project_name():
     Raises:
         AssertionError: If project name cannot be found
     """
-    pyproject_path = find_pyproject_toml()
+    pyproject_path = find_pyproject_toml(start_path)
     with open(pyproject_path) as f:
         content = f.read()
 

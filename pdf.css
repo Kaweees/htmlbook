@@ -11,6 +11,13 @@ body {
   font-size: 12px !important;
 }
 
+/* Intrinsic image sizes and HTML width attributes can exceed the print area. */
+img {
+  max-width: 100% !important;
+  max-height: 700px !important;
+  object-fit: contain;
+}
+
 [data-type="titlepage"] {
   font-size: 16px !important;
 }

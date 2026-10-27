@@ -1,109 +1,136 @@
-# Constructs the pdf from the html content.  Run it from the textbook root directory:
-# python3 htmlbook/make_pdf.py && xpdf {underactuated|manipulation}.pdf
-# or, this *should* work (but isn't):
-# xpdf -remote foo "openFile(manipulation.pdf)" &
-# python3 htmlbook/make_pdf.py && xpdf -remote foo reload
-#
-# Requires PrinceXML: https://www.princexml.com/latest/
-# on 18.04 it was: sudo apt install prince
+"""Build a book PDF; see Developers.md for prerequisites and usage."""
 
-# Also requires puppeteer for offline rendering of mathjax, etc.
-#
-# cd ~
-# curl -sL https://deb.nodesource.com/setup_10.x -o nodesource_setup.sh
-# sudo bash nodesource_setup.sh
-# sudo apt install -y nodejs
-# npm i puppeteer --save
-#
-# Note: I had to manually npm i some of the missing deps on my first try to get # the installer to complete without errors.
-
-# TODO
-# - Remove prince watermark from first page?  (How much does it cost?)
-# - Bibliography?
-# MAYBE
-# - prince-books?  https://www.princexml.com/doc/prince-for-books/
-# - overflow-x warning is coming from highlight.js
-# - font-size-adjust comes in through the rendering process.  but I could
-#   investigate more.
-
+import argparse
 import json
 import os
+import shutil
+import subprocess
 import tempfile
+from html.parser import HTMLParser
+from pathlib import Path
+from urllib.parse import urljoin, urlsplit
+
+if __package__:
+    from .book_name import get_project_name
+else:
+    from book_name import get_project_name
 
 
-def get_file_as_string(filename):
-    f = open(filename, "r")
-    s = f.read()
-    f.close()
-    return s
+class CanonicalURLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.url = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "link" and "canonical" in attrs.get("rel", "").split():
+            self.url = attrs.get("href")
 
 
-def write_file_as_string(filename, s):
-    f = open(filename, "w")
-    f.write(s)
-    f.close()
+def get_book_url(index_html):
+    """Use the published URL, independent of the checkout's directory name."""
+    parser = CanonicalURLParser()
+    parser.feed(index_html)
+    parsed = urlsplit(parser.url or "")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("index.html needs an HTTP(S) canonical URL; use --book-url")
+    return urljoin(parser.url, ".")
 
 
-def replace_string_before(s, before_str, with_str):
-    r = with_str + s[s.find(before_str) :]
-    return r
-
-
-def replace_string_after(s, after_str, with_str):
-    loc = s.find(after_str) + len(after_str)
-    r = s[:loc] + with_str
-    return r
-
-
-def replace_string_between(s, start_str, end_str, with_str):
-    index = 0
-    while s.find(start_str, index) > 0:
-        start = s.find(start_str, index) + len(start_str)
-        end = s.find(end_str, start)
-        s = s[:start] + with_str + s[end:]
-        index = start + len(with_str)
-    return s
-
-
-# root should be textbook repo root/book
-root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-basename = os.path.basename(root)
-
-dir = tempfile.TemporaryDirectory()
-os.symlink(os.path.join(root, "htmlbook"), os.path.join(dir.name, "htmlbook"))
-os.symlink(os.path.join(root, "data"), os.path.join(dir.name, "data"))
-os.symlink(os.path.join(root, "figures"), os.path.join(dir.name, "figures"))
-
-chapters = json.load(open(os.path.join(root, "chapters.json")))
-chapter_ids = ["index"] + chapters["chapter_ids"]
-
-prince_input_files = ""
-for c in chapter_ids:
-    filename = os.path.join(dir.name, c + ".html")
-    s = get_file_as_string(os.path.join(root, c + ".html"))
-
-    # Tweak html for rendering
-
-    # Remove hypothesis
-    s = s.replace('<script src="https://hypothes.is/embed.js" async></script>', "")
-    s = s.replace(
+def prepare_html(source):
+    # Annotation scripts can alter text after MathJax has typeset it.
+    return source.replace(
+        '<script src="https://hypothes.is/embed.js" async></script>', ""
+    ).replace(
         '<script type="text/plain" data-run-after="mathjax" '
         'src="https://hypothes.is/embed.js"></script>',
         "",
     )
 
-    # links to data should point to online version
-    s = s.replace('href="data/', f'href="http://{basename}.csail.mit.edu/data/')
 
-    write_file_as_string(filename, s)
-    #  os.system(f"node {os.path.join(root, 'htmlbook/render_html.js')} http://{basename}.csail.mit.edu/{c}.html {filename}")
-    os.system(
-        f"node {os.path.join(root, 'htmlbook/render_html.js')} file://{filename} {filename}"
+def build_pdf(root, output, book_url=None):
+    root = Path(root).resolve()
+    output = Path(output).resolve()
+    book_url = book_url or get_book_url(
+        (root / "index.html").read_text(encoding="utf-8")
     )
-    prince_input_files += " " + filename
+    parsed = urlsplit(book_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("--book-url must be an HTTP(S) URL")
+    book_url = book_url.rstrip("/") + "/"
+    for tool in ("node", "prince"):
+        if not shutil.which(tool):
+            raise RuntimeError(
+                f"{tool} is required to build PDFs; see htmlbook/Developers.md"
+            )
 
-os.system(
-    f"prince -s {os.path.join(root,'htmlbook/pdf.css')} {prince_input_files} -o {basename}.pdf"
-)
+    chapters = json.loads((root / "chapters.json").read_text(encoding="utf-8"))
+    chapter_files = [f"{c}.html" for c in ["index", *chapters["chapter_ids"]]]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the final PDF on the output filesystem so replacement is atomic.
+    with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory(
+        dir=output.parent
+    ) as pdf_directory:
+        directory = Path(directory)
+        for asset in root.iterdir():
+            if asset.name not in chapter_files:
+                (directory / asset.name).symlink_to(asset)
+        # Prepare every chapter first, so Prince can resolve cross-chapter links.
+        for filename in chapter_files:
+            (directory / filename).write_text(
+                prepare_html((root / filename).read_text(encoding="utf-8")),
+                encoding="utf-8",
+            )
+        for filename in chapter_files:
+            path = directory / filename
+            print(f"Rendering {filename}", flush=True)
+            subprocess.run(
+                [
+                    "node",
+                    str(root / "htmlbook/render_html.js"),
+                    path.as_uri(),
+                    str(path),
+                    book_url,
+                    *chapter_files,
+                ],
+                check=True,
+            )
+        temporary_pdf = Path(pdf_directory) / output.name
+        subprocess.run(
+            [
+                "prince",
+                "-s",
+                str(root / "htmlbook/pdf.css"),
+                *[str(directory / filename) for filename in chapter_files],
+                "-o",
+                str(temporary_pdf),
+            ],
+            check=True,
+        )
+        if not temporary_pdf.is_file() or temporary_pdf.stat().st_size == 0:
+            raise RuntimeError("Prince did not produce a PDF")
+        os.replace(temporary_pdf, output)
+    return output
 
-dir.cleanup()
+
+def main():
+    root = Path(__file__).resolve().parent.parent
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "-o", "--output", type=Path, help="output PDF (default: <project-name>.pdf)"
+    )
+    parser.add_argument(
+        "--book-url",
+        help="published book directory URL (default: index.html canonical URL)",
+    )
+    args = parser.parse_args()
+    output = args.output or Path(f"{get_project_name(root)}.pdf")
+    try:
+        result = build_pdf(root, output, args.book_url)
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f"PDF build failed: {error}\n")
+    print(f"Wrote {result}")
+
+
+if __name__ == "__main__":
+    main()

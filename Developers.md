@@ -118,6 +118,59 @@ Note that the website will only install the dependencies in the `docs` group, so
 
 
 
+## Building the book PDF
+
+The PDF builder needs Node.js, Puppeteer, and
+[Prince](https://www.princexml.com/download/). From the consuming repository's
+root, initialize its submodules and install Puppeteer:
+
+```sh
+git submodule update --init --recursive
+npm install --no-save puppeteer
+```
+
+Puppeteer normally downloads its browser during installation. If your package
+manager blocks installation scripts, install it explicitly with
+`npx puppeteer browsers install`; see the
+[Puppeteer installation guide](https://pptr.dev/guides/installation).
+Alternatively, set `PUPPETEER_EXECUTABLE_PATH` to an existing Chrome executable.
+For example, on macOS:
+
+```sh
+brew install --cask prince
+export PUPPETEER_EXECUTABLE_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+```
+
+With the repository's `.venv` ready, run from its root:
+
+```sh
+.venv/bin/python book/htmlbook/make_pdf.py
+# Or choose the destination:
+.venv/bin/python book/htmlbook/make_pdf.py --output output/pdf/manipulation.pdf
+```
+
+The default filename comes from the project name in `pyproject.toml`, rather
+than the checkout or `book` directory name. Output paths are relative to the
+working directory. The builder includes `index.html` and `chapter_ids` from
+`chapters.json`, leaving draft chapters out. Puppeteer waits for MathJax and
+fonts before saving HTML, then Prince applies `pdf.css`, which constrains
+images to the printable area.
+
+Links to included chapters stay internal to the PDF. Other local links,
+including animations, notebooks, draft chapters, and API documentation, point
+to the website directory inferred from the canonical URL in `index.html`.
+Use `--book-url https://example.org/notes/` to override that directory.
+Rendering failures stop the build and leave an existing output PDF intact.
+The builder needs no PDF postprocessing dependency. Prince's non-commercial
+license adds a small logo to the first page.
+
+Run the PDF regression checks from the repository root:
+
+```sh
+PYTHONPATH=book .venv/bin/python -m unittest htmlbook.test_make_pdf
+node --test book/htmlbook/test_render_html.js book/htmlbook/test_mathjax.js
+```
+
 ## To debug a notebook with a local build of Drake
 
 There are several approaches, but perhaps easiest is to just add a few lines at the top of the notebook:
